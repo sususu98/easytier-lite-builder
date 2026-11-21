@@ -1,0 +1,166 @@
+name: Build EasyTier Lite (No-UPX)
+
+on:
+  workflow_dispatch:
+    inputs:
+      easytier_ref:
+        description: "EasyTier git tag/branch/SHA to build"
+        required: true
+        default: "v2.6.4"
+        type: string
+      features:
+        description: "Cargo features (built with --no-default-features)"
+        required: true
+        default: "aes-gcm,tun,zstd"
+        type: string
+      target:
+        description: "Rust musl target triple"
+        required: true
+        default: "aarch64-unknown-linux-musl"
+        type: choice
+        options:
+          - aarch64-unknown-linux-musl
+          - x86_64-unknown-linux-musl
+      opt_level:
+        description: "Cargo release opt-level (z = smallest binary, s = small, 3 = fast)"
+        required: true
+        default: "z"
+        type: choice
+        options:
+          - "z"
+          - "s"
+          - "3"
+      build_cli:
+        description: "Also build easytier-cli"
+        required: false
+        default: false
+        type: boolean
+      publish_release:
+        description: "Publish binary to GitHub Release"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ${{ inputs.target == 'aarch64-unknown-linux-musl' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      - name: Checkout EasyTier (${{ inputs.easytier_ref }})
+        uses: actions/checkout@v4
+        with:
+          repository: EasyTier/EasyTier
+          ref: ${{ inputs.easytier_ref }}
+          path: src
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qqy build-essential mold musl-tools binutils
+
+      - name: Setup Rust toolchain (1.95)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.95"
+          target: ${{ inputs.target }}
+          cache: false
+
+      - name: Cache Cargo registry & crates
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src -> target"
+          cache-targets: "false"
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build easytier-core (No-UPX, minimal features)
+        working-directory: src
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ inputs.opt_level }}
+          CARGO_PROFILE_RELEASE_LTO: "true"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_PANIC: "abort"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          BINS="--bin easytier-core"
+          if [[ "${{ inputs.build_cli }}" == "true" ]]; then
+            BINS="$BINS --bin easytier-cli"
+          fi
+          echo "Building $BINS for ${{ inputs.target }} with --no-default-features --features ${{ inputs.features }} (opt-level=${{ inputs.opt_level }})"
+          cargo build --release \
+            --target "${{ inputs.target }}" \
+            --package easytier \
+            $BINS \
+            --no-default-features \
+            --features "${{ inputs.features }}"
+
+      - name: Inspect, verify & package (strictly NO UPX)
+        run: |
+          mkdir -p dist
+          CORE="src/target/${{ inputs.target }}/release/easytier-core"
+          cp "$CORE" dist/easytier-core
+          chmod 755 dist/easytier-core
+
+          if [[ "${{ inputs.build_cli }}" == "true" ]]; then
+            cp "src/target/${{ inputs.target }}/release/easytier-cli" dist/easytier-cli
+            chmod 755 dist/easytier-cli
+          fi
+
+          if strings dist/easytier-core | grep -q "UPX!"; then
+            echo "ERROR: Unexpected UPX header found!" >&2
+            exit 1
+          fi
+
+          {
+            echo "easytier_ref=${{ inputs.easytier_ref }}"
+            echo "easytier_commit=$(git -C src rev-parse --short HEAD)"
+            echo "target=${{ inputs.target }}"
+            echo "features=${{ inputs.features }}"
+            echo "opt_level=${{ inputs.opt_level }}"
+            echo "upx=none"
+            echo "--- version ---"
+            ./dist/easytier-core --version
+            echo "--- file ---"
+            file dist/easytier-core
+            echo "--- size (bytes / human) ---"
+            ls -lh dist/easytier-core
+            stat -c "bytes=%s" dist/easytier-core
+            echo "--- ELF sections ---"
+            size dist/easytier-core
+            echo "--- sha256 ---"
+            (cd dist && sha256sum easytier-core*)
+          } | tee dist/build-info.txt
+
+          (cd dist && sha256sum easytier-core* > SHA256SUMS.txt)
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: easytier-lite-${{ inputs.easytier_ref }}-${{ inputs.target }}-opt${{ inputs.opt_level }}
+          path: dist/*
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.easytier_ref }}-lite-${{ inputs.target }}"
+          TITLE="EasyTier ${{ inputs.easytier_ref }} Lite (${{ inputs.target }}, no-UPX)"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file dist/build-info.txt
+          else
+            gh release create "$TAG" dist/* --title "$TITLE" --notes-file dist/build-info.txt
+          fi

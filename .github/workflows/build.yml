@@ -52,7 +52,7 @@ jobs:
     runs-on: ${{ inputs.target == 'aarch64-unknown-linux-musl' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     steps:
       - name: Checkout EasyTier (${{ inputs.easytier_ref }})
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: EasyTier/EasyTier
           ref: ${{ inputs.easytier_ref }}
@@ -70,6 +70,7 @@ jobs:
           toolchain: "1.95"
           target: ${{ inputs.target }}
           cache: false
+          rustflags: ""
 
       - name: Cache Cargo registry & crates
         uses: Swatinem/rust-cache@v2

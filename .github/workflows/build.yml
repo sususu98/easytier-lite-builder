@@ -157,11 +157,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          REPO="${{ github.repository }}"
           TAG="${{ inputs.easytier_ref }}-lite-${{ inputs.target }}"
           TITLE="EasyTier ${{ inputs.easytier_ref }} Lite (${{ inputs.target }}, no-UPX)"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-            gh release edit "$TAG" --title "$TITLE" --notes-file dist/build-info.txt
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" -R "$REPO" dist/* --clobber
+            gh release edit "$TAG" -R "$REPO" --title "$TITLE" --notes-file dist/build-info.txt
           else
-            gh release create "$TAG" dist/* --title "$TITLE" --notes-file dist/build-info.txt
+            gh release create "$TAG" -R "$REPO" --target "${{ github.ref_name }}" dist/* --title "$TITLE" --notes-file dist/build-info.txt
           fi
